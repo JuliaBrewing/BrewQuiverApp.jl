@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><title>spike</title>
+<script src="cytoscape.min.js"></script><script src="elk.bundled.js"></script>
+<script src="cytoscape-elk.js"></script><script src="lodash.min.js"></script><script>window.memoize=_.memoize;window.throttle=_.throttle;</script><script src="cytoscape-edgehandles.js"></script>
+<style>body{margin:0;font:13px sans-serif;display:flex}#cy{width:1100px;height:800px}#side{padding:8px;width:300px}</style>
+</head><body><div id="cy"></div><div id="side"><div id="sel"></div><ol id="hist"></ol></div><script>
+const srmRGB = s => { if (s == null) return '#ccc'; const t = Math.min(s,40)/40;
+  return `rgb(${Math.round(250-130*t)},${Math.round(230-200*t)},${Math.round(120-110*t)})`; };
+const pending = new Map(); let seq = 0;
+const ws = new WebSocket(`ws://${location.host}/ws`);
+window.send = (m) => new Promise(r => { m.seq = ++seq; pending.set(m.seq, {r, t: performance.now()}); ws.send(JSON.stringify(m)); });
+window.lat = [];
+let cy;
+function elements(g) {
+  const els = [], vs = new Set();
+  for (const n of g.nodes) { if (n.vessel) vs.add(n.vessel);
+    els.push({data:{id:n.id, parent:n.vessel||undefined, label:n.id, color:srmRGB(n.srm), ...n}}); }
+  for (const v of vs) els.push({data:{id:'v:'+v, label:v}});
+  for (const n of els) if (n.data.parent) n.data.parent = 'v:'+n.data.parent;
+  g.edges.forEach((e,i) => els.push({data:{id:'e'+i, source:e.source, target:e.target, label:e.label}}));
+  return els;
+}
+function render(g) {
+  cy = cytoscape({container: document.getElementById('cy'), elements: elements(g),
+    style: [{selector:"node[color]", style:{label:'data(label)','background-color':'data(color)','font-size':9,width:18,height:18}},
+            {selector:':parent', style:{'background-opacity':.08,'text-valign':'top'}},
+            {selector:'edge', style:{label:'data(label)','font-size':7,'curve-style':'bezier','target-arrow-shape':'triangle',width:1}},
+            {selector:'.changed', style:{'border-width':3,'border-color':'red'}}],
+    layout: {name:'elk', elk:{algorithm:'layered','elk.direction':'RIGHT','elk.hierarchyHandling':'INCLUDE_CHILDREN'}}});
+  cy.on('grab', 'node', e => send({cmd:'begin', desc:'Move '+e.target.id()}));
+  cy.on('drag', 'node', e => { const p = e.target.position(); send({cmd:'move', node:e.target.id(), x:p.x, y:p.y}); });
+  cy.on('free', 'node', e => send({cmd:'commit'}));
+  cy.on('tap', 'node', e => { document.getElementById('sel').textContent = JSON.stringify(e.target.data()); });
+  window.eh = cy.edgehandles({canConnect: (s,t) => !s.isParent() && !t.isParent() && s !== t});
+  cy.on('ehcomplete', (ev, s, t, added) => { added.remove(); send({cmd:'connect', source:s.id(), target:t.id()}); });
+  window.renderedAt = performance.now();
+}
+ws.onmessage = ev => { const m = JSON.parse(ev.data);
+  if (m.seq && pending.has(m.seq)) { const p = pending.get(m.seq); lat.push(performance.now()-p.t); pending.delete(m.seq); p.r(m); }
+  if (m.type === 'graph') render(m);
+  if (m.type === 'update') { cy.nodes().removeClass('changed');
+    for (const n of m.changed) { const el = cy.getElementById(n.id); el.data({...n, color: srmRGB(n.srm)}); el.addClass('changed'); }
+    if (m.graph) { cy.json({elements: elements(m.graph)}); } }
+  if (m.type === 'history' || m.type === 'reload') document.getElementById('hist').innerHTML =
+    (m.history || m.undo).map(d => `<li>${d}</li>`).join('');
+};
+</script></body></html>
